@@ -7,6 +7,17 @@
 #include "kv_computer.hpp"
 #include "attention_executor.hpp"
 
+#undef CUDA_CHECK
+#define CUDA_CHECK(stmt)                                                          \
+    do {                                                                          \
+        cudaError_t result = (stmt);                                              \
+        if (cudaSuccess != result) {                                              \
+            fprintf(stderr, "[%s:%d] cuda failed with %s \n", __FILE__, __LINE__, \
+                    cudaGetErrorString(result));                                  \
+            exit(-1);                                                             \
+        }                                                                         \
+    } while (0)
+
 std::string compute_prefix_hash(const std::vector<int>& tokens) {
     std::string key;
     for (int t : tokens) {
@@ -23,11 +34,28 @@ int main() {
     const int embed_dim = 32;
     const int head_dim = 16;
     const size_t block_bytes = tokens_per_block * head_dim * sizeof(float);
+    float* shm_k_base, *shm_v_base;  // 放在allocator中还是放在主函数中？
+    int mype, npes, mype_node;
 
-    KVAllocator allocator(device_id, num_blocks, block_bytes);
+    KVAllocator allocator(device_id, num_blocks, block_bytes);  // 包含了free_queue_
     KVComputer kv_computer(embed_dim, head_dim, tokens_per_block);
     AttentionExecutor executor(head_dim);
-    auto& cache = PrefixCacheManager::get_instance();
+    auto& cache = PrefixCacheManager::get_instance();  // local_cache
+
+    nvshmem_init();  // 或 nvshmemx_init_attr(...) 
+    mype = nvshmem_my_pe();
+    npes = nvshmem_n_pes();
+    mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+
+    CUDA_CHECK(cudaSetDevice(mype_node));
+
+    // NVSHMEM 分配共享内存池，可以在cuda kernel中直接使用
+    shm_k_base = nvshmem_malloc(num_blocks * block_bytes);
+    shm_v_base = nvshmem_malloc(num_blocks * block_bytes);
+    if (!shm_k_base || !shm_v_base) {
+        std::cerr << "nvshmem_malloc failed for shared pool on device " << device_id_ << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
 
     // prompts暂时不考虑不能填满block的情况
     std::vector<std::vector<int>> prompts = {
@@ -71,15 +99,21 @@ int main() {
                     // master命中 → 从远程pe拉取kv
                     size_t sep1 = resp.find(':', 6);
                     size_t sep2 = resp.find(':', sep1 + 1);
-                    int remote_pe = std::stoi(resp.substr(6, sep1 - 6));
+                    int remote_pe = std::stoi(resp.substr(6, sep1 - 6));  // 其他PE号，这个很重要
                     uintptr_t addr = std::stoull(resp.substr(sep1 + 1));
-                    float* remote_ptr = reinterpret_cast<float*>(addr);
+                    float* remote_ptr = reinterpret_cast<float*>(addr);  // 地址本身就是float*，这里要不要reinterpret_cast转换
 
+                    // 本地设置空间去接远程pe的数据
+                    // put/get的API案例中，dest和source都得是nvshmem分配的内存（称为对称地址）
+                    // 本地分配了一大片空间，但是都已经和本地的block绑定了
+                    // 所以是不是还得再分配一片对称地址，专门用于存储其他PE的数据，为了简单，我们用完一次就重置，并且相应的数据不加入本地查找表
+                    // nvshmemx_float_get_block 函数需要在cuda kernel中调用
                     float* local_k = (float*)malloc(tokens_per_block * head_dim * sizeof(float));
                     float* local_v = (float*)malloc(tokens_per_block * head_dim * sizeof(float));
                     nvshmem_getmem(local_k, remote_ptr, tokens_per_block * head_dim * sizeof(float), remote_pe);
                     nvshmem_getmem(local_v, remote_ptr + tokens_per_block * head_dim, tokens_per_block * head_dim * sizeof(float), remote_pe);
 
+                    // 给block的v_ptr（shm_v_base_）和k_ptr（shm_k_base_）赋值就好了，其他的都不用
                     KVLocation remote_loc;
                     remote_loc.device_id = device_id;
                     remote_loc.block_id = -1;  // remote，无需 block_id
@@ -95,18 +129,20 @@ int main() {
             if (kv_loc.has_value()) {
                 std::cout << "  Block [" << i << "," << end << "): Hit → GPU"
                         << kv_loc->device_id << ", block_id=" << kv_loc->block_id << "\n";
-                cache.retain(hash);
+                cache.retain(hash);  // table_[hash].ref_cnt++;
                 cached_blocks.push_back(kv_loc);
                 continue;
             }
 
             // 本地和master都miss，自己生成block
+            // ？应该从free_queue_中分配block，free_queue_中包含的block都是带有分配好的空间的
+            // 
             std::cout << "  Block [" << i << "," << end << "): Miss → Allocated\n";
             float* k_buf = (float*)nvshmem_malloc(tokens_per_block * head_dim * sizeof(float));
             float* v_buf = (float*)nvshmem_malloc(tokens_per_block * head_dim * sizeof(float));
-            kv_computer.compute_and_fill(k_buf, v_buf, block_tokens);  // 假设你改过 compute_and_fill 支持 float* 写入
+            kv_computer.compute_and_fill(k_buf, v_buf, block_tokens);  // 假设改过 compute_and_fill 支持 float* 写入
 
-            KVLocation new_loc;
+            KVLocation new_loc;  // KVLocation 和 
             new_loc.device_id = device_id;
             new_loc.block_id = -1;
             new_loc.local_k_ptr = k_buf;

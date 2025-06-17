@@ -14,6 +14,10 @@ struct KVCacheBlock {
     void* k_ptr = nullptr;
     void* v_ptr = nullptr;
 
+    // nvshmem分配空间的初始位置（nvshmem给的案例的指针类型很明确，就是float*）
+    float* shm_k_base_ = nullptr;
+    float* shm_v_base_ = nullptr;
+
     std::optional<cudaIpcMemHandle_t> ipc_k;  // 不需要
     std::optional<cudaIpcMemHandle_t> ipc_v;  // 不需要
 

@@ -41,6 +41,8 @@
 #include <vector>
 #include <cuda_runtime.h>
 #include <memory>
+#include <nvshmem.h>
+#include <nvshmemx.h>
 #include "kv_cache_block.hpp"
 #include "free_kv_block_queue.hpp"
 
@@ -63,6 +65,9 @@ private:
 
     void* k_base_ = nullptr;
     void* v_base_ = nullptr;
+    
+    float* shm_k_base_; 
+    float* shm_v_base_;  // 放在allocator中还是放在主函数中？
 
     std::vector<std::unique_ptr<KVCacheBlock>> blocks_;
     std::unique_ptr<FreeKVCacheBlockQueue> free_queue_;

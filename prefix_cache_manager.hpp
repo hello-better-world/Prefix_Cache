@@ -74,7 +74,7 @@ struct KVLocation {
     std::optional<cudaIpcMemHandle_t> ipc_k;
     std::optional<cudaIpcMemHandle_t> ipc_v;
 
-    std::vector<float> remote_host_k;  // host 上缓存 K 值
+    std::vector<float> remote_host_k;  // host 上缓存 K 值，以假装这块数据可以被其他GPU上使用
     std::vector<float> remote_host_v;  // host 上缓存 V 值
 };
 

@@ -91,18 +91,34 @@ KVAllocator::KVAllocator(int device_id, int num_blocks, size_t block_bytes)
         std::exit(EXIT_FAILURE);
     }
 
+    // NVSHMEM 分配共享内存池
+    shm_k_base_ = nvshmem_malloc(num_blocks_ * block_bytes_);
+    shm_v_base_ = nvshmem_malloc(num_blocks_ * block_bytes_);
+    if (!shm_k_base_ || !shm_v_base_) {
+        std::cerr << "nvshmem_malloc failed for shared pool on device " << device_id_ << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+    size_t floats_per_block = block_bytes_ / sizeof(float);
+
     // 初始化每个 block，设定其逻辑视图指针
     for (int i = 0; i < num_blocks_; ++i) {
         auto block = std::make_unique<KVCacheBlock>();
         block->block_id = i;
         block->device_id = device_id_;
+
+        // 本地CUDA malloc 分配的地址
         block->k_ptr = static_cast<char*>(k_base_) + i * block_bytes_;
         block->v_ptr = static_cast<char*>(v_base_) + i * block_bytes_;
+
+        // NVSHMEM 分配的共享地址
+        block->shm_k_base_ = shm_k_base_ + i * floats_per_block;
+
         cudaIpcMemHandle_t k_handle, v_handle;
         cudaIpcGetMemHandle(&k_handle, block->k_ptr);
         cudaIpcGetMemHandle(&v_handle, block->v_ptr);
         block->ipc_k = k_handle;
         block->ipc_v = v_handle;
+
         blocks_.push_back(std::move(block));
     }
 

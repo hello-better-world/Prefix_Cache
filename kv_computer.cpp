@@ -67,6 +67,8 @@ std::vector<float> KVComputer::matmul(const std::vector<float>& vec,
 void KVComputer::compute_and_fill(KVCacheBlock* block, const std::vector<int>& tokens) {
     assert(tokens.size() <= (size_t)tokens_per_block_);
 
+    // 写数据的时候，根据base+offset地址写，或者根据block的成员变量地址写，这里是根据block的成员变量地址写的
+    // 但是，为什么要逐个token的计算，应该直接计算全部token的
     for (size_t i = 0; i < tokens.size(); ++i) {
         auto emb = embed_token(tokens[i]);
         auto k_vec = matmul(emb, k_weight_);
